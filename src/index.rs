@@ -4,12 +4,11 @@ use pyo3::{exceptions, prelude::*, types::PyAny};
 
 use crate::{
     document::{extract_value, Document},
-    get_field,
-    query::Query,
-    schema::Schema,
-    searcher::Searcher,
-    to_pyerr,
+    get_field, to_pyerr, Schema, Searcher, TokenizerManager,
 };
+
+use crate::query::Query;
+
 use tantivy as tv;
 use tantivy::{
     directory::MmapDirectory,
@@ -277,7 +276,7 @@ impl Index {
     #[staticmethod]
     fn exists(path: &str) -> PyResult<bool> {
         let directory = MmapDirectory::open(path).map_err(to_pyerr)?;
-        Ok(tv::Index::exists(&directory))
+        tv::Index::exists(&directory).map_err(to_pyerr)
     }
 
     /// The schema of the current index.
@@ -285,6 +284,18 @@ impl Index {
     fn schema(&self) -> Schema {
         let schema = self.index.schema();
         Schema { inner: schema }
+    }
+
+    /// TokenizerManager associated to the index.
+    #[getter]
+    fn tokenizers(&self) -> TokenizerManager {
+        let tokenizers = unsafe {
+            std::mem::transmute::<
+                &tv::tokenizer::TokenizerManager,
+                &'static tv::tokenizer::TokenizerManager,
+            >(self.index.tokenizers())
+        };
+        TokenizerManager { inner: tokenizers }
     }
 
     /// Update searchers so that they reflect the state of the last .commit().
