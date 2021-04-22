@@ -232,11 +232,17 @@ impl SchemaBuilder {
     /// Add a Facet field to the schema.
     /// Args:
     ///     name (str): The name of the field.
-    fn add_facet_field(&mut self, name: &str) -> PyResult<Self> {
+    fn add_facet_field(
+        &mut self,
+        name: &str,
+        stored: bool,
+        indexed: bool,
+    ) -> PyResult<Self> {
         let builder = &mut self.builder;
+        let opts = SchemaBuilder::build_facet_option(stored, indexed)?;
 
         if let Some(builder) = builder.write().unwrap().as_mut() {
-            builder.add_facet_field(name);
+            builder.add_facet_field(name, opts);
         } else {
             return Err(exceptions::PyValueError::new_err(
                 "Schema builder object isn't valid anymore.",
@@ -253,11 +259,18 @@ impl SchemaBuilder {
     ///
     /// Args:
     ///     name (str): The name of the field.
-    fn add_bytes_field(&mut self, name: &str) -> PyResult<Self> {
+    fn add_bytes_field(
+        &mut self,
+        name: &str,
+        stored: bool,
+        indexed: bool,
+        fast: bool,
+    ) -> PyResult<Self> {
         let builder = &mut self.builder;
+        let opts = SchemaBuilder::build_bytes_option(indexed, stored, fast)?;
 
         if let Some(builder) = builder.write().unwrap().as_mut() {
-            builder.add_bytes_field(name);
+            builder.add_bytes_field(name, opts);
         } else {
             return Err(exceptions::PyValueError::new_err(
                 "Schema builder object isn't valid anymore.",
@@ -313,6 +326,31 @@ impl SchemaBuilder {
         } else {
             opts
         };
+
+        Ok(opts)
+    }
+
+    fn build_facet_option(
+        stored: bool,
+        indexed: bool,
+    ) -> PyResult<schema::FacetOptions> {
+        let opts = schema::FacetOptions::default();
+
+        let opts = if stored { opts.set_stored() } else { opts };
+        let opts = if indexed { opts.set_indexed() } else { opts };
+        Ok(opts)
+    }
+
+    fn build_bytes_option(
+        stored: bool,
+        indexed: bool,
+        fast: bool,
+    ) -> PyResult<schema::BytesOptions> {
+        let opts = schema::BytesOptions::default();
+
+        let opts = if stored { opts.set_stored() } else { opts };
+        let opts = if indexed { opts.set_indexed() } else { opts };
+        let opts = if fast { opts.set_fast() } else { opts };
 
         Ok(opts)
     }
