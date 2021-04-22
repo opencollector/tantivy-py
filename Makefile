@@ -1,3 +1,5 @@
+DOCKER = docker
+
 source_files := $(wildcard src/*.rs)
 
 all: tantivy/tantivy.so
@@ -15,3 +17,6 @@ tantivy/tantivy.so: target/debug/libtantivy.so
 
 target/debug/libtantivy.so: $(source_files)
 	cargo build
+
+build-wheels:
+	$(DOCKER) run --rm -v $$PWD:/io:rw konstin2/maturin:latest build --release
