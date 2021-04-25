@@ -1,9 +1,9 @@
 #![allow(clippy::new_ret_no_self)]
 
-use crate::{document::Document, get_field, query::Query, to_pyerr};
-use pyo3::{exceptions::PyValueError, prelude::*, PyObjectProtocol};
+use crate::{document::Document, get_field, query::Query, to_pyerr, facet::Facet};
+use pyo3::{exceptions::PyValueError, PyTraverseError, prelude::*, PyObjectProtocol, types::PyString, PyIterProtocol, PyGCProtocol, PyVisit};
 use tantivy as tv;
-use tantivy::collector::{Count, MultiCollector, TopDocs};
+use tantivy::collector::{Count, MultiCollector, TopDocs, FacetCollector, FruitHandle};
 
 /// Tantivy's Searcher class
 ///
@@ -37,6 +37,75 @@ impl ToPyObject for Fruit {
     }
 }
 
+
+#[pyclass(gc)]
+pub(crate) struct FacetChildIterator {
+    ref_: Py<FacetCounts>,
+    inner: tv::collector::FacetChildIterator<'static>
+}
+
+#[pyproto]
+impl PyIterProtocol for FacetChildIterator {
+    fn __iter__(pyself: PyRef<Self>) -> PyResult<Py<FacetChildIterator>> {
+        Ok(pyself.into())
+    }
+
+    fn __next__(mut self_: PyRefMut<Self>) -> PyResult<Option<(Facet, u64)>> {
+        Ok(
+            match self_.inner.next() {
+                Some((facet, count)) => Some((Facet{ inner: facet.clone() }, count)),
+                None => None,
+            }
+        )
+    }
+}
+
+#[pyproto]
+impl PyGCProtocol for FacetChildIterator {
+    fn __traverse__(&self, visit: PyVisit) -> Result<(), PyTraverseError> {
+        visit.call(&self.ref_)?;
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        drop(&self.ref_);
+    }
+}
+
+#[pyclass(gc)]
+pub(crate) struct FacetCounts {
+    ref_: Py<SearchResult>,
+    inner: &'static tv::collector::FacetCounts
+}
+
+#[pyproto]
+impl PyGCProtocol for FacetCounts {
+    fn __traverse__(&self, visit: PyVisit) -> Result<(), PyTraverseError> {
+        visit.call(&self.ref_)?;
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        drop(&self.ref_);
+    }
+}
+
+#[pymethods]
+impl FacetCounts {
+    fn get(self_: Py<FacetCounts>, f: &Facet, py: Python) -> FacetChildIterator {
+        FacetChildIterator{ ref_: self_.clone_ref(py), inner: unsafe { std::mem::transmute::<tv::collector::FacetChildIterator, tv::collector::FacetChildIterator<'static>>(self_.borrow(py).inner.get(f.inner.clone())) } }
+    }
+
+    fn top_k(&self, f: &Facet, k: usize) -> Vec<(Facet, u64)> {
+        self.inner.top_k(f.inner.clone(), k)
+        .iter()
+        .map(|&(facet, count)| -> (Facet, u64) {
+            (Facet{ inner: facet.clone() }, count)
+        })
+        .collect()
+    }
+}
+
 #[pyclass]
 /// Object holding a results successful search.
 pub(crate) struct SearchResult {
@@ -45,6 +114,8 @@ pub(crate) struct SearchResult {
     /// How many documents matched the query. Only available if `count` was set
     /// to true during the search.
     count: Option<usize>,
+    /// Facet counts
+    facet_counts: Option<tv::collector::FacetCounts>
 }
 
 #[pyproto]
@@ -74,6 +145,30 @@ impl SearchResult {
             .collect();
         Ok(ret)
     }
+
+    #[getter]
+    fn facet_counts(self_: Py<SearchResult>, py: Python) -> PyResult<Option<FacetCounts>> {
+        let facet_counts = &self_.borrow(py).facet_counts;
+        Ok(match facet_counts {
+            Some(facet_counts) => Some(FacetCounts { ref_: self_.clone_ref(py), inner: unsafe { std::mem::transmute::<&tv::collector::FacetCounts, &'static tv::collector::FacetCounts>(&facet_counts) } }),
+            None => None
+        })
+    }
+}
+
+#[pyclass]
+/// Object storing the facet collector specification
+pub(crate) struct Facets {
+    field: Py<PyString>,
+    facets: Vec<Py<Facet>>,
+}
+
+#[pymethods]
+impl Facets {
+    #[new]
+    fn new(field: &PyString, facets: Vec<Py<Facet>>) -> Self {
+        Facets{field: field.into(), facets: facets}
+    }
 }
 
 #[pymethods]
@@ -92,6 +187,8 @@ impl Searcher {
     ///         fields.
     ///     offset (Field, optional): The offset from which the results have
     ///         to be returned.
+    ///     facets (Vec<&str>, optional): Gets the searcher to return the specified
+    ///         facets.
     ///
     /// Returns `SearchResult` object.
     ///
@@ -105,11 +202,31 @@ impl Searcher {
         count: bool,
         order_by_field: Option<&str>,
         offset: usize,
+        facets: Option<&Facets>,
     ) -> PyResult<SearchResult> {
         let mut multicollector = MultiCollector::new();
 
         let count_handle = if count {
             Some(multicollector.add_collector(Count))
+        } else {
+            None
+        };
+
+        let facet_counts_handle = if let Some(facets) = facets {
+            Some(
+                Python::with_gil(|py| -> PyResult<FruitHandle<tv::collector::FacetCounts>> {
+                    match self.inner.schema().get_field(facets.field.as_ref(py).to_str()?) {
+                        None => Err(PyValueError::new_err(format!("no such field: {}", facets.field))),
+                        Some(field) => {
+                            let mut facetcollector = FacetCollector::for_field(field);
+                            for facet in &facets.facets {
+                                facetcollector.add_facet(facet.borrow(py).inner.clone())
+                            }
+                            Ok(multicollector.add_collector(facetcollector))
+                        }
+                    }
+                })?
+            )
         } else {
             None
         };
@@ -162,7 +279,12 @@ impl Searcher {
             None => None,
         };
 
-        Ok(SearchResult { hits, count })
+        let facet_counts = match facet_counts_handle {
+            Some(h) => Some(h.extract(&mut multifruit)),
+            None => None,
+        };
+
+        Ok(SearchResult { hits, count, facet_counts })
     }
 
     /// Returns the overall number of documents in the index.
