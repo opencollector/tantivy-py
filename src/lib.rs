@@ -15,7 +15,7 @@ use facet::Facet;
 use index::Index;
 use schema::Schema;
 use schemabuilder::SchemaBuilder;
-use searcher::{DocAddress, Searcher};
+use searcher::{DocAddress, Searcher, Facets};
 use tokenizers::{
     NgramTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
     TokenizerManager,
@@ -86,6 +86,7 @@ fn tantivy(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<TextAnalyzer>()?;
     m.add_class::<NgramTokenizer>()?;
     m.add_class::<TokenizerManager>()?;
+    m.add_class::<Facets>()?;
     Ok(())
 }
 
