@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyString;
-use pyo3::PyIterProtocol;
+use pyo3::{types::PyString, PyIterProtocol, PyGCProtocol, PyVisit, PyTraverseError};
 use tantivy as tv;
 
 /// Tantivy Token
@@ -38,7 +37,7 @@ impl Token {
 }
 
 /// Tantivy TokenStream
-#[pyclass(unsendable)]
+#[pyclass(unsendable, gc)]
 pub(crate) struct TokenStream {
     ref_: Py<PyString>,
     s_: &'static str,
@@ -63,6 +62,18 @@ impl PyIterProtocol for TokenStream {
             })),
             false => Ok(None),
         }
+    }
+}
+
+#[pyproto]
+impl PyGCProtocol for TokenStream {
+    fn __traverse__(&self, visit: PyVisit) -> Result<(), PyTraverseError> {
+        visit.call(&self.ref_)?;
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        drop(&self.ref_);
     }
 }
 
