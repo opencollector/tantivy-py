@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 chrono = "0.4.19"
-tantivy = { git = "https://github.com/opencollector/tantivy.git", branch = "add-methods-for-tantivy-py", version="0.14.0" }
+tantivy = { git = "https://github.com/opencollector/tantivy.git", branch = "private-modifications", version="0.14.0" }
 itertools = "0.9.0"
 futures = "0.3.5"
 
