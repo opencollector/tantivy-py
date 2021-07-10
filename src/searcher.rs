@@ -250,13 +250,13 @@ impl Searcher {
     ///         fields.
     ///     offset (Field, optional): The offset from which the results have
     ///         to be returned.
-    ///     facet_axes (Vec<&Facets>): Gets the searcher to return the specified
-    ///                                axes of facets.
+    ///     facet_axes (&PySequence, optional): Gets the searcher to return the
+    ///         specified axes of facets.
     ///
     /// Returns `SearchResult` object.
     ///
     /// Raises a ValueError if there was an error with the search.
-    #[args(limit = 10, offset = 0, count = true)]
+    #[args(limit = 10, offset = 0, count = true, facet_axes = "None")]
     fn search(
         &self,
         _py: Python,
@@ -265,7 +265,7 @@ impl Searcher {
         count: bool,
         order_by_field: Option<&str>,
         offset: usize,
-        facet_axes: &PySequence,
+        facet_axes: Option<&PySequence>,
     ) -> PyResult<SearchResult> {
         let mut multicollector = MultiCollector::new();
 
@@ -279,31 +279,34 @@ impl Searcher {
             &str,
             FruitHandle<tv::collector::FacetCounts>,
         )> = Vec::new();
-        for i in 0..facet_axes.len()? {
-            let axis_as_pyany = facet_axes.get_item(i)?;
-            let axis: PyRef<Facets> = axis_as_pyany.extract()?;
-            let field_name = unsafe {
-                std::mem::transmute::<&str, &'static str>(
-                    axis.field.as_ref(_py).to_str()?,
-                )
-            };
-            match self.inner.schema().get_field(field_name) {
-                None => {
-                    return Err(PyValueError::new_err(format!(
-                        "no such field: {}",
-                        axis.field
-                    )))
-                }
-                Some(field) => {
-                    let mut facetcollector = FacetCollector::for_field(field);
-                    for facet in &axis.facets {
-                        facetcollector
-                            .add_facet(facet.borrow(_py).inner.clone())
+        if let Some(facet_axes) = facet_axes {
+            for i in 0..facet_axes.len()? {
+                let axis_as_pyany = facet_axes.get_item(i)?;
+                let axis: PyRef<Facets> = axis_as_pyany.extract()?;
+                let field_name = unsafe {
+                    std::mem::transmute::<&str, &'static str>(
+                        axis.field.as_ref(_py).to_str()?,
+                    )
+                };
+                match self.inner.schema().get_field(field_name) {
+                    None => {
+                        return Err(PyValueError::new_err(format!(
+                            "no such field: {}",
+                            axis.field
+                        )))
                     }
-                    facet_counts_handles.push((
-                        field_name,
-                        multicollector.add_collector(facetcollector),
-                    ))
+                    Some(field) => {
+                        let mut facetcollector =
+                            FacetCollector::for_field(field);
+                        for facet in &axis.facets {
+                            facetcollector
+                                .add_facet(facet.borrow(_py).inner.clone())
+                        }
+                        facet_counts_handles.push((
+                            field_name,
+                            multicollector.add_collector(facetcollector),
+                        ))
+                    }
                 }
             }
         }
