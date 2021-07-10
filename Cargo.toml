@@ -1,6 +1,6 @@
 [package]
 name = "tantivy_oc_fork"
-version = "0.14.0"
+version = "0.16.0-dev"
 readme = "README.md"
 authors = ["Damir Jelić <poljar@termina.org.uk>"]
 edition = "2018"
