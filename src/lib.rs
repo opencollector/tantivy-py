@@ -15,7 +15,7 @@ use facet::Facet;
 use index::Index;
 use schema::Schema;
 use schemabuilder::SchemaBuilder;
-use searcher::{DocAddress, Searcher, Facets};
+use searcher::{DocAddress, Facets, Searcher};
 use tokenizers::{
     NgramTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer,
     TokenizerManager,

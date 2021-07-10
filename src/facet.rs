@@ -1,6 +1,5 @@
 use pyo3::{basic::PyObjectProtocol, exceptions, prelude::*, types::PyType};
 use tantivy::schema;
-use tantivy::TantivyError;
 
 /// A Facet represent a point in a given hierarchy.
 ///
@@ -50,17 +49,12 @@ impl Facet {
     fn from_string(_cls: &PyType, facet_string: &str) -> PyResult<Facet> {
         match schema::Facet::from_text(facet_string) {
             Ok(inner) => Ok(Facet { inner: inner }),
-            Err(e) => Err(match e {
-                TantivyError::InvalidArgument(path) => {
-                    exceptions::PyValueError::new_err(format!(
-                        "The facet field is invalid: {}",
-                        path
-                    ))
-                }
-                _ => exceptions::PyValueError::new_err(
-                    "The facet field is invalid",
-                ),
-            }),
+            Err(schema::FacetParseError::FacetParseError(path)) => {
+                Err(exceptions::PyValueError::new_err(format!(
+                    "The facet field is invalid: {}",
+                    path
+                )))
+            }
         }
     }
 

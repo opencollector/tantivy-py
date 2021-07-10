@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::{types::PyString, PyIterProtocol, PyGCProtocol, PyVisit, PyTraverseError};
+use pyo3::{
+    types::PyString, PyGCProtocol, PyIterProtocol, PyTraverseError, PyVisit,
+};
 use tantivy as tv;
 
 /// Tantivy Token
