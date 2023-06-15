@@ -19,4 +19,4 @@ target/debug/libtantivy.so: $(source_files)
 	cargo build
 
 build-wheels:
-	$(DOCKER) run --rm -v $$PWD:/io:rw konstin2/maturin:latest build --release
+	$(DOCKER) run --env PYTHON_ROOT="/opt/python/$${PYTHON}/bin" --rm -v $$PWD:/io:rw pypa-manylinux2014-with-rustup:2023-06-11-02cacaf -- sh -c '. ~/.cargo/env && cd /io && "$${PYTHON_ROOT}/maturin" build --release'
