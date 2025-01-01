@@ -1,4 +1,11 @@
-use pyo3::{basic::PyObjectProtocol, exceptions, prelude::*, types::PyType};
+use crate::to_pyerr;
+use pyo3::{
+    basic::CompareOp,
+    prelude::*,
+    types::{PyTuple, PyType},
+};
+use serde::{Deserialize, Serialize};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use tantivy::schema;
 
 /// A Facet represent a point in a given hierarchy.
@@ -10,17 +17,25 @@ use tantivy::schema;
 /// implicitely imply that a document belonging to a facet also belongs to the
 /// ancestor of its facet. In the example above, /electronics/tv_and_video/
 /// and /electronics.
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(frozen, module = "tantivy.tantivy")]
+#[derive(Clone, Deserialize, PartialEq, Serialize, Hash)]
 pub(crate) struct Facet {
     pub(crate) inner: schema::Facet,
 }
 
 #[pymethods]
 impl Facet {
+    /// Creates a `Facet` from its binary representation.
+    #[staticmethod]
+    fn from_encoded(encoded_bytes: Vec<u8>) -> PyResult<Self> {
+        let inner =
+            schema::Facet::from_encoded(encoded_bytes).map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
     /// Create a new instance of the "root facet" Equivalent to /.
     #[classmethod]
-    fn root(_cls: &PyType) -> Facet {
+    fn root(_cls: &Bound<PyType>) -> Facet {
         Facet {
             inner: schema::Facet::root(),
         }
@@ -46,15 +61,9 @@ impl Facet {
     ///
     /// Returns the created Facet.
     #[classmethod]
-    fn from_string(_cls: &PyType, facet_string: &str) -> PyResult<Facet> {
-        match schema::Facet::from_text(facet_string) {
-            Ok(inner) => Ok(Facet { inner: inner }),
-            Err(schema::FacetParseError::FacetParseError(path)) => {
-                Err(exceptions::PyValueError::new_err(format!(
-                    "The facet field is invalid: {}",
-                    path
-                )))
-            }
+    fn from_string(_cls: &Bound<PyType>, facet_string: &str) -> Facet {
+        Facet {
+            inner: schema::Facet::from(facet_string),
         }
     }
 
@@ -69,11 +78,41 @@ impl Facet {
     fn to_path_str(&self) -> String {
         self.inner.to_string()
     }
-}
 
-#[pyproto]
-impl PyObjectProtocol for Facet {
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("Facet({})", self.to_path_str()))
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+
+    fn __richcmp__<'py>(
+        &self,
+        other: &Self,
+        op: CompareOp,
+        py: Python<'_>,
+    ) -> PyObject {
+        match op {
+            CompareOp::Eq => (self == other).into_py(py),
+            CompareOp::Ne => (self != other).into_py(py),
+            _ => py.NotImplemented(),
+        }
+    }
+
+    fn __reduce__<'a>(
+        slf: PyRef<'a, Self>,
+        py: Python<'a>,
+    ) -> PyResult<Bound<'a, PyTuple>> {
+        let encoded_bytes = slf.inner.encoded_str().as_bytes().to_vec();
+        Ok(PyTuple::new_bound(
+            py,
+            [
+                slf.into_py(py).getattr(py, "from_encoded")?,
+                PyTuple::new_bound(py, [encoded_bytes]).to_object(py),
+            ],
+        ))
     }
 }

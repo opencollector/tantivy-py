@@ -1,18 +1,31 @@
 #![allow(clippy::new_ret_no_self)]
 
+use std::collections::HashMap;
+
 use pyo3::{exceptions, prelude::*, types::PyAny};
 
 use crate::{
     document::{extract_value, Document},
-    get_field, to_pyerr, Schema, Searcher, TokenizerManager,
+    get_field,
+    parser_error::QueryParserErrorIntoPy,
+    query::Query,
+    schema::Schema,
+    searcher::Searcher,
+    to_pyerr,
+    tokenizers::TokenizerManager,
 };
-
-use crate::query::Query;
 
 use tantivy as tv;
 use tantivy::{
     directory::MmapDirectory,
-    schema::{NamedFieldDocument, Term, Value},
+    schema::{
+        document::TantivyDocument, NamedFieldDocument, OwnedValue as Value,
+        Term,
+    },
+    tokenizer::{
+        Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer,
+        TextAnalyzer,
+    },
 };
 
 const RELOAD_POLICY: &str = "commit";
@@ -21,10 +34,36 @@ const RELOAD_POLICY: &str = "commit";
 ///
 /// To create an IndexWriter first create an Index and call the writer() method
 /// on the index object.
-#[pyclass]
+#[pyclass(module = "tantivy.tantivy")]
 pub(crate) struct IndexWriter {
-    inner_index_writer: tv::IndexWriter,
+    inner_index_writer: Option<tv::IndexWriter>,
     schema: tv::schema::Schema,
+}
+
+impl IndexWriter {
+    fn inner(&self) -> PyResult<&tv::IndexWriter> {
+        self.inner_index_writer.as_ref().ok_or_else(|| {
+            exceptions::PyRuntimeError::new_err(
+                "IndexWriter was consumed and no longer in a valid state",
+            )
+        })
+    }
+
+    fn inner_mut(&mut self) -> PyResult<&mut tv::IndexWriter> {
+        self.inner_index_writer.as_mut().ok_or_else(|| {
+            exceptions::PyRuntimeError::new_err(
+                "IndexWriter was consumed and no longer in a valid state",
+            )
+        })
+    }
+
+    fn take_inner(&mut self) -> PyResult<tv::IndexWriter> {
+        self.inner_index_writer.take().ok_or_else(|| {
+            exceptions::PyRuntimeError::new_err(
+                "IndexWriter was consumed and no longer in a valid state",
+            )
+        })
+    }
 }
 
 #[pymethods]
@@ -39,8 +78,9 @@ impl IndexWriter {
     /// since the creation of the index.
     pub fn add_document(&mut self, doc: &Document) -> PyResult<u64> {
         let named_doc = NamedFieldDocument(doc.field_values.clone());
-        let doc = self.schema.convert_named_doc(named_doc).map_err(to_pyerr)?;
-        Ok(self.inner_index_writer.add_document(doc))
+        let doc = TantivyDocument::convert_named_doc(&self.schema, named_doc)
+            .map_err(to_pyerr)?;
+        self.inner()?.add_document(doc).map_err(to_pyerr)
     }
 
     /// Helper for the `add_document` method, but passing a json string.
@@ -52,9 +92,10 @@ impl IndexWriter {
     /// The `opstamp` represents the number of documents that have been added
     /// since the creation of the index.
     pub fn add_json(&mut self, json: &str) -> PyResult<u64> {
-        let doc = self.schema.parse_document(json).map_err(to_pyerr)?;
-        let opstamp = self.inner_index_writer.add_document(doc);
-        Ok(opstamp)
+        let doc = TantivyDocument::parse_json(&self.schema, json)
+            .map_err(to_pyerr)?;
+        let opstamp = self.inner()?.add_document(doc);
+        opstamp.map_err(to_pyerr)
     }
 
     /// Commits all of the pending changes
@@ -67,7 +108,7 @@ impl IndexWriter {
     ///
     /// Returns the `opstamp` of the last document that made it in the commit.
     fn commit(&mut self) -> PyResult<u64> {
-        self.inner_index_writer.commit().map_err(to_pyerr)
+        self.inner_mut()?.commit().map_err(to_pyerr)
     }
 
     /// Rollback to the last commit
@@ -76,14 +117,19 @@ impl IndexWriter {
     /// commit. After calling rollback, the index is in the same state as it
     /// was after the last commit.
     fn rollback(&mut self) -> PyResult<u64> {
-        self.inner_index_writer.rollback().map_err(to_pyerr)
+        self.inner_mut()?.rollback().map_err(to_pyerr)
     }
 
     /// Detect and removes the files that are not used by the index anymore.
     fn garbage_collect_files(&mut self) -> PyResult<()> {
         use futures::executor::block_on;
-        block_on(self.inner_index_writer.garbage_collect_files())
-            .map_err(to_pyerr)?;
+        block_on(self.inner()?.garbage_collect_files()).map_err(to_pyerr)?;
+        Ok(())
+    }
+
+    /// Deletes all documents from the index.
+    fn delete_all_documents(&mut self) -> PyResult<()> {
+        self.inner()?.delete_all_documents().map_err(to_pyerr)?;
         Ok(())
     }
 
@@ -95,8 +141,8 @@ impl IndexWriter {
     /// This is also the opstamp of the commit that is currently available
     /// for searchers.
     #[getter]
-    fn commit_opstamp(&self) -> u64 {
-        self.inner_index_writer.commit_opstamp()
+    fn commit_opstamp(&self) -> PyResult<u64> {
+        Ok(self.inner()?.commit_opstamp())
     }
 
     /// Delete all documents containing a given term.
@@ -110,31 +156,55 @@ impl IndexWriter {
     fn delete_documents(
         &mut self,
         field_name: &str,
-        field_value: &PyAny,
+        field_value: &Bound<PyAny>,
     ) -> PyResult<u64> {
         let field = get_field(&self.schema, field_name)?;
         let value = extract_value(field_value)?;
         let term = match value {
+            Value::Null => {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Field `{field_name}` is null type not deletable."
+                )))
+            },
             Value::Str(text) => Term::from_field_text(field, &text),
             Value::U64(num) => Term::from_field_u64(field, num),
             Value::I64(num) => Term::from_field_i64(field, num),
             Value::F64(num) => Term::from_field_f64(field, num),
-            Value::Date(d) => Term::from_field_date(field, &d),
+            Value::Date(d) => Term::from_field_date(field, d),
             Value::Facet(facet) => Term::from_facet(field, &facet),
             Value::Bytes(_) => {
                 return Err(exceptions::PyValueError::new_err(format!(
-                    "Field `{}` is bytes type not deletable.",
-                    field_name
+                    "Field `{field_name}` is bytes type not deletable."
                 )))
             }
             Value::PreTokStr(_pretok) => {
                 return Err(exceptions::PyValueError::new_err(format!(
-                    "Field `{}` is pretokenized. This is not authorized for delete.",
-                    field_name
+                    "Field `{field_name}` is pretokenized. This is not authorized for delete."
                 )))
             }
+            Value::Array(_) => {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Field `{field_name}` is array type not deletable."
+                )))
+            }
+            Value::Object(_) => {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Field `{field_name}` is json object type not deletable."
+                )))
+            },
+            Value::Bool(b) => Term::from_field_bool(field, b),
+            Value::IpAddr(i) => Term::from_field_ip_addr(field, i)
         };
-        Ok(self.inner_index_writer.delete_term(term))
+        Ok(self.inner()?.delete_term(term))
+    }
+
+    /// If there are some merging threads, blocks until they all finish
+    /// their work and then drop the `IndexWriter`.
+    ///
+    /// This will consume the `IndexWriter`. Further accesses to the
+    /// object will result in an error.
+    pub fn wait_merging_threads(&mut self) -> PyResult<()> {
+        self.take_inner()?.wait_merging_threads().map_err(to_pyerr)
     }
 }
 
@@ -149,7 +219,7 @@ impl IndexWriter {
 ///
 /// If an index already exists it will be opened and reused. Raises OSError
 /// if there was a problem during the opening or creation of the index.
-#[pyclass]
+#[pyclass(module = "tantivy.tantivy")]
 pub(crate) struct Index {
     pub(crate) index: tv::Index,
     reader: tv::IndexReader,
@@ -160,12 +230,15 @@ impl Index {
     #[staticmethod]
     fn open(path: &str) -> PyResult<Index> {
         let index = tv::Index::open_in_dir(path).map_err(to_pyerr)?;
+
+        Index::register_custom_text_analyzers(&index);
+
         let reader = index.reader().map_err(to_pyerr)?;
         Ok(Index { index, reader })
     }
 
     #[new]
-    #[args(reuse = true)]
+    #[pyo3(signature = (schema, path = None, reuse = true))]
     fn new(schema: &Schema, path: Option<&str>, reuse: bool) -> PyResult<Self> {
         let index = match path {
             Some(p) => {
@@ -184,6 +257,8 @@ impl Index {
             None => tv::Index::create_in_ram(schema.inner.clone()),
         };
 
+        Index::register_custom_text_analyzers(&index);
+
         let reader = index.reader().map_err(to_pyerr)?;
         Ok(Index { index, reader })
     }
@@ -194,14 +269,19 @@ impl Index {
     /// split between the given number of threads.
     ///
     /// Args:
-    ///     overall_heap_size (int, optional): The total target memory usage of
-    ///         the writer, can't be less than 3000000.
+    ///     overall_heap_size (int, optional): The total target heap memory usage of
+    ///         the writer. Tantivy requires that this can't be less
+    ///         than 3000000 *per thread*. Lower values will result in more
+    ///         frequent internal commits when adding documents (slowing down
+    ///         write progress), and larger values will results in fewer
+    ///         commits but greater memory usage. The best value will depend
+    ///         on your specific use case.
     ///     num_threads (int, optional): The number of threads that the writer
     ///         should use. If this value is 0, tantivy will choose
     ///         automatically the number of threads.
     ///
     /// Raises ValueError if there was an error while creating the writer.
-    #[args(heap_size = 3000000, num_threads = 0)]
+    #[pyo3(signature = (heap_size = 128_000_000, num_threads = 0))]
     fn writer(
         &self,
         heap_size: usize,
@@ -214,7 +294,7 @@ impl Index {
         .map_err(to_pyerr)?;
         let schema = self.index.schema();
         Ok(IndexWriter {
-            inner_index_writer: writer,
+            inner_index_writer: Some(writer),
             schema,
         })
     }
@@ -224,19 +304,19 @@ impl Index {
     /// Args:
     ///     reload_policy (str, optional): The reload policy that the
     ///         IndexReader should use. Can be `Manual` or `OnCommit`.
-    ///     num_searchers (int, optional): The number of searchers that the
+    ///     num_warmers (int, optional): The number of searchers that the
     ///         reader should create.
-    #[args(reload_policy = "RELOAD_POLICY", num_searchers = 0)]
+    #[pyo3(signature = (reload_policy = RELOAD_POLICY, num_warmers = 0))]
     fn config_reader(
         &mut self,
         reload_policy: &str,
-        num_searchers: usize,
+        num_warmers: usize,
     ) -> Result<(), PyErr> {
         let reload_policy = reload_policy.to_lowercase();
         let reload_policy = match reload_policy.as_ref() {
-            "commit" => tv::ReloadPolicy::OnCommit,
-            "on-commit" => tv::ReloadPolicy::OnCommit,
-            "oncommit" => tv::ReloadPolicy::OnCommit,
+            "commit" => tv::ReloadPolicy::OnCommitWithDelay,
+            "on-commit" => tv::ReloadPolicy::OnCommitWithDelay,
+            "oncommit" => tv::ReloadPolicy::OnCommitWithDelay,
             "manual" => tv::ReloadPolicy::Manual,
             _ => return Err(exceptions::PyValueError::new_err(
                 "Invalid reload policy, valid choices are: 'manual' and 'OnCommit'"
@@ -244,8 +324,8 @@ impl Index {
         };
         let builder = self.index.reader_builder();
         let builder = builder.reload_policy(reload_policy);
-        let builder = if num_searchers > 0 {
-            builder.num_searchers(num_searchers)
+        let builder = if num_warmers > 0 {
+            builder.num_warming_threads(num_warmers)
         } else {
             builder
         };
@@ -254,19 +334,13 @@ impl Index {
         Ok(())
     }
 
-    /// Acquires a Searcher from the searcher pool.
+    /// Returns a searcher
     ///
-    /// If no searcher is available during the call, note that
-    /// this call will block until one is made available.
-    ///
-    /// Searcher are automatically released back into the pool when
-    /// they are dropped. If you observe this function to block forever
-    /// you probably should configure the Index to have a larger
-    /// searcher pool, or you are holding references to previous searcher
-    /// for ever.
-    fn searcher(&self, py: Python) -> Searcher {
+    /// This method should be called every single time a search query is performed.
+    /// The same searcher must be used for a given query, as it ensures the use of a consistent segment set.
+    fn searcher(&self) -> Searcher {
         Searcher {
-            inner: py.allow_threads(|| self.reader.searcher()),
+            inner: self.reader.searcher(),
         }
     }
 
@@ -315,48 +389,175 @@ impl Index {
     ///
     /// Args:
     ///     query: the query, following the tantivy query language.
-    ///     default_fields (List[Field]): A list of fields used to search if no
+    ///
+    ///     default_fields_names (List[Field]): A list of fields used to search if no
     ///         field is specified in the query.
     ///
-    #[args(reload_policy = "RELOAD_POLICY")]
+    ///     field_boosts: A dictionary keyed on field names which provides default boosts
+    ///         for the query constructed by this method.
+    ///
+    ///     fuzzy_fields: A dictionary keyed on field names which provides (prefix, distance, transpose_cost_one)
+    ///         triples making queries constructed by this method fuzzy against the given fields
+    ///         and using the given parameters.
+    ///         `prefix` determines if terms which are prefixes of the given term match the query.
+    ///         `distance` determines the maximum Levenshtein distance between terms matching the query and the given term.
+    ///         `transpose_cost_one` determines if transpositions of neighbouring characters are counted only once against the Levenshtein distance.
+    #[pyo3(signature = (query, default_field_names = None, field_boosts = HashMap::new(), fuzzy_fields = HashMap::new()))]
     pub fn parse_query(
         &self,
         query: &str,
         default_field_names: Option<Vec<String>>,
+        field_boosts: HashMap<String, tv::Score>,
+        fuzzy_fields: HashMap<String, (bool, u8, bool)>,
     ) -> PyResult<Query> {
-        let mut default_fields = vec![];
-        let schema = self.index.schema();
-        if let Some(default_field_names_vec) = default_field_names {
-            for default_field_name in &default_field_names_vec {
-                if let Some(field) = schema.get_field(default_field_name) {
-                    let field_entry = schema.get_field_entry(field);
-                    if !field_entry.is_indexed() {
-                        return Err(exceptions::PyValueError::new_err(
-                            format!(
-                            "Field `{}` is not set as indexed in the schema.",
-                            default_field_name
-                        ),
-                        ));
-                    }
-                    default_fields.push(field);
-                } else {
-                    return Err(exceptions::PyValueError::new_err(format!(
-                        "Field `{}` is not defined in the schema.",
-                        default_field_name
-                    )));
-                }
-            }
-        } else {
-            for (field, field_entry) in self.index.schema().fields() {
-                if field_entry.is_indexed() {
-                    default_fields.push(field);
-                }
-            }
-        }
-        let parser =
-            tv::query::QueryParser::for_index(&self.index, default_fields);
+        let parser = self.prepare_query_parser(
+            default_field_names,
+            field_boosts,
+            fuzzy_fields,
+        )?;
+
         let query = parser.parse_query(query).map_err(to_pyerr)?;
 
         Ok(Query { inner: query })
+    }
+
+    /// Parse a query leniently.
+    ///
+    /// This variant parses invalid query on a best effort basis. If some part of the query can't
+    /// reasonably be executed (range query without field, searching on a non existing field,
+    /// searching without precising field when no default field is provided...), they may get turned
+    /// into a "match-nothing" subquery.
+    ///
+    /// Args:
+    ///     query: the query, following the tantivy query language.
+    ///
+    ///     default_fields_names (List[Field]): A list of fields used to search if no
+    ///         field is specified in the query.
+    ///
+    ///     field_boosts: A dictionary keyed on field names which provides default boosts
+    ///         for the query constructed by this method.
+    ///
+    ///     fuzzy_fields: A dictionary keyed on field names which provides (prefix, distance, transpose_cost_one)
+    ///         triples making queries constructed by this method fuzzy against the given fields
+    ///         and using the given parameters.
+    ///         `prefix` determines if terms which are prefixes of the given term match the query.
+    ///         `distance` determines the maximum Levenshtein distance between terms matching the query and the given term.
+    ///         `transpose_cost_one` determines if transpositions of neighbouring characters are counted only once against the Levenshtein distance.
+    ///
+    /// Returns a tuple containing the parsed query and a list of errors.
+    ///
+    /// Raises ValueError if a field in `default_field_names` is not defined or marked as indexed.
+    #[pyo3(signature = (query, default_field_names = None, field_boosts = HashMap::new(), fuzzy_fields = HashMap::new()))]
+    pub fn parse_query_lenient(
+        &self,
+        query: &str,
+        default_field_names: Option<Vec<String>>,
+        field_boosts: HashMap<String, tv::Score>,
+        fuzzy_fields: HashMap<String, (bool, u8, bool)>,
+        py: Python,
+    ) -> PyResult<(Query, Vec<PyObject>)> {
+        let parser = self.prepare_query_parser(
+            default_field_names,
+            field_boosts,
+            fuzzy_fields,
+        )?;
+
+        let (query, errors) = parser.parse_query_lenient(query);
+        let errors = errors.into_iter().map(|err| err.into_py(py)).collect();
+
+        Ok((Query { inner: query }, errors))
+    }
+}
+
+impl Index {
+    fn prepare_query_parser(
+        &self,
+        default_field_names: Option<Vec<String>>,
+        field_boosts: HashMap<String, tv::Score>,
+        fuzzy_fields: HashMap<String, (bool, u8, bool)>,
+    ) -> PyResult<tv::query::QueryParser> {
+        let schema = self.index.schema();
+
+        let default_fields = if let Some(default_field_names) =
+            default_field_names
+        {
+            default_field_names.iter().map(|field_name| {
+                let field = schema.get_field(field_name).map_err(|_err| {
+                    exceptions::PyValueError::new_err(format!(
+                        "Field `{field_name}` is not defined in the schema."
+                    ))
+                })?;
+
+                let field_entry = schema.get_field_entry(field);
+                if !field_entry.is_indexed() {
+                    return Err(exceptions::PyValueError::new_err(
+                        format!("Field `{field_name}` is not set as indexed in the schema.")
+                    ));
+                }
+
+                Ok(field)
+            }).collect::<PyResult<_>>()?
+        } else {
+            schema
+                .fields()
+                .filter(|(_, field_entry)| field_entry.is_indexed())
+                .map(|(field, _)| field)
+                .collect()
+        };
+
+        let mut parser =
+            tv::query::QueryParser::for_index(&self.index, default_fields);
+
+        for (field_name, boost) in field_boosts {
+            let field = schema.get_field(&field_name).map_err(|_err| {
+                exceptions::PyValueError::new_err(format!(
+                    "Field `{field_name}` is not defined in the schema."
+                ))
+            })?;
+            parser.set_field_boost(field, boost);
+        }
+
+        for (field_name, (prefix, distance, transpose_cost_one)) in fuzzy_fields
+        {
+            let field = schema.get_field(&field_name).map_err(|_err| {
+                exceptions::PyValueError::new_err(format!(
+                    "Field `{field_name}` is not defined in the schema."
+                ))
+            })?;
+            parser.set_field_fuzzy(field, prefix, distance, transpose_cost_one);
+        }
+
+        Ok(parser)
+    }
+
+    fn register_custom_text_analyzers(index: &tv::Index) {
+        let analyzers = [
+            ("ar_stem", Language::Arabic),
+            ("da_stem", Language::Danish),
+            ("nl_stem", Language::Dutch),
+            ("fi_stem", Language::Finnish),
+            ("fr_stem", Language::French),
+            ("de_stem", Language::German),
+            ("el_stem", Language::Greek),
+            ("hu_stem", Language::Hungarian),
+            ("it_stem", Language::Italian),
+            ("no_stem", Language::Norwegian),
+            ("pt_stem", Language::Portuguese),
+            ("ro_stem", Language::Romanian),
+            ("ru_stem", Language::Russian),
+            ("es_stem", Language::Spanish),
+            ("sv_stem", Language::Swedish),
+            ("ta_stem", Language::Tamil),
+            ("tr_stem", Language::Turkish),
+        ];
+
+        for (name, lang) in &analyzers {
+            let an = TextAnalyzer::builder(SimpleTokenizer::default())
+                .filter(RemoveLongFilter::limit(40))
+                .filter(LowerCaser)
+                .filter(Stemmer::new(*lang))
+                .build();
+            index.tokenizers().register(name, an);
+        }
     }
 }

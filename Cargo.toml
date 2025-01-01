@@ -1,21 +1,29 @@
 [package]
 name = "tantivy_oc_fork"
-version = "0.16.0-dev"
+version = "0.22.0-dev"
 readme = "README.md"
 authors = ["Damir Jelić <poljar@termina.org.uk>"]
-edition = "2018"
+edition = "2021"
 license = "MIT"
 
 [lib]
 name = "tantivy"
 crate-type = ["cdylib"]
 
+[build-dependencies]
+pyo3-build-config = "0.23.3"
+
 [dependencies]
-chrono = "0.4.19"
-tantivy = { git = "https://github.com/opencollector/tantivy", tag = "0.16.1-oc" }
-itertools = "0.9.0"
-futures = "^0.3.15"
+base64 = "0.22"
+chrono = "0.4.39"
+tantivy = "0.22.0"
+itertools = "0.13.0"
+futures = "0.3.31"
+pythonize = "0.21.0"
+serde = "1.0"
+serde_json = "1.0.134"
+tantivy-tokenizer-api = "0.3.0"
 
 [dependencies.pyo3]
-version = "0.13.2"
-features = ["extension-module"]
+version = "0.21.0"
+features = ["chrono", "extension-module"]

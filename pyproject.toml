@@ -1,3 +1,27 @@
 [build-system]
-requires = ["maturin>=0.11,<0.12"]
+requires = ["maturin<=1.3.2"]
 build-backend = "maturin"
+
+[project]
+name = "tantivy_oc_fork"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dev = [
+    "nox",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+
+[tool.pytest.ini_options]
+# Set the durations option and doctest modules
+# See https://docs.pytest.org/en/latest/usage.html#durations
+addopts = "--doctest-modules --durations=10"
+# Use the `--ignore-glob` setting to exclude the `noxfile.py` module from the doctests
+# See https://docs.pytest.org/en/latest/reference.html#confval-ignore_glob
+testpaths = [
+    "tests",
+    "tantivy",
+    "src",
+]
