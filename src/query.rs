@@ -11,8 +11,8 @@ use pyo3::{
 use tantivy as tv;
 
 /// Tantivy's Occur
-#[pyclass(frozen, module = "tantivy.tantivy")]
-#[derive(Clone)]
+#[pyclass(frozen, eq, eq_int, module = "tantivy.tantivy")]
+#[derive(Clone, PartialEq)]
 pub enum Occur {
     Must,
     Should,
@@ -209,6 +209,7 @@ impl Query {
 
     /// Construct a Tantivy's DisjunctionMaxQuery
     #[staticmethod]
+    #[pyo3(signature = (subqueries, tie_breaker = None))]
     pub(crate) fn disjunction_max_query(
         subqueries: Vec<Query>,
         tie_breaker: Option<Bound<PyFloat>>,

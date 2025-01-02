@@ -455,7 +455,7 @@ impl Index {
         field_boosts: HashMap<String, tv::Score>,
         fuzzy_fields: HashMap<String, (bool, u8, bool)>,
         py: Python,
-    ) -> PyResult<(Query, Vec<PyObject>)> {
+    ) -> PyResult<(Query, Vec<Py<PyAny>>)> {
         let parser = self.prepare_query_parser(
             default_field_names,
             field_boosts,
@@ -463,7 +463,10 @@ impl Index {
         )?;
 
         let (query, errors) = parser.parse_query_lenient(query);
-        let errors = errors.into_iter().map(|err| err.into_py(py)).collect();
+        let errors = errors
+            .into_iter()
+            .map(|err| err.into_py(py).map(|v| v.unbind()))
+            .collect::<PyResult<Vec<Py<PyAny>>>>()?;
 
         Ok((Query { inner: query }, errors))
     }

@@ -2,7 +2,7 @@ use crate::to_pyerr;
 use pyo3::{
     basic::CompareOp,
     prelude::*,
-    types::{PyTuple, PyType},
+    types::{PyNotImplemented, PyTuple, PyType},
 };
 use serde::{Deserialize, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -93,13 +93,17 @@ impl Facet {
         &self,
         other: &Self,
         op: CompareOp,
-        py: Python<'_>,
-    ) -> PyObject {
-        match op {
-            CompareOp::Eq => (self == other).into_py(py),
-            CompareOp::Ne => (self != other).into_py(py),
-            _ => py.NotImplemented(),
-        }
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match op {
+            CompareOp::Eq => {
+                (self == other).into_pyobject(py)?.to_owned().into_any()
+            }
+            CompareOp::Ne => {
+                (self != other).into_pyobject(py)?.to_owned().into_any()
+            }
+            _ => PyNotImplemented::get(py).to_owned().into_any(),
+        })
     }
 
     fn __reduce__<'a>(
@@ -107,12 +111,12 @@ impl Facet {
         py: Python<'a>,
     ) -> PyResult<Bound<'a, PyTuple>> {
         let encoded_bytes = slf.inner.encoded_str().as_bytes().to_vec();
-        Ok(PyTuple::new_bound(
+        PyTuple::new(
             py,
             [
-                slf.into_py(py).getattr(py, "from_encoded")?,
-                PyTuple::new_bound(py, [encoded_bytes]).to_object(py),
+                slf.into_pyobject(py)?.getattr("from_encoded")?,
+                PyTuple::new(py, [encoded_bytes])?.into_any(),
             ],
-        ))
+        )
     }
 }

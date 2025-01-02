@@ -2,7 +2,7 @@
 
 use crate::{document::Document, facet::Facet, query::Query, to_pyerr};
 use pyo3::gc::PyVisit;
-use pyo3::types::{PyDict, PyList, PySequence, PyTuple};
+use pyo3::types::{PyDict, PyList, PyNotImplemented, PySequence, PyTuple};
 use pyo3::{
     basic::CompareOp, exceptions::PyValueError, prelude::*, PyTraverseError,
 };
@@ -44,12 +44,35 @@ impl std::fmt::Debug for Fruit {
     }
 }
 
-impl ToPyObject for Fruit {
-    fn to_object(&self, py: Python) -> PyObject {
-        match self {
-            Fruit::Score(s) => s.to_object(py),
-            Fruit::Order(o) => o.to_object(py),
-        }
+impl<'py> IntoPyObject<'py> for Fruit {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(
+        self,
+        py: Python<'py>,
+    ) -> Result<Self::Output, Self::Error> {
+        Ok(match self {
+            Fruit::Score(s) => s.into_pyobject(py)?.into_any(),
+            Fruit::Order(o) => o.into_pyobject(py)?.into_any(),
+        })
+    }
+}
+
+impl<'a, 'py> IntoPyObject<'py> for &'a Fruit {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(
+        self,
+        py: Python<'py>,
+    ) -> Result<Self::Output, Self::Error> {
+        Ok(match self {
+            Fruit::Score(s) => s.into_pyobject(py)?.into_any(),
+            Fruit::Order(o) => o.into_pyobject(py)?.into_any(),
+        })
     }
 }
 
@@ -135,7 +158,7 @@ impl FacetCounts {
     }
 }
 
-#[pyclass(frozen, module = "tantivy.tantivy")]
+#[pyclass(frozen, eq, eq_int, module = "tantivy.tantivy")]
 #[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
 /// Enum representing the direction in which something should be sorted.
 pub(crate) enum Order {
@@ -184,21 +207,23 @@ impl SearchResult {
     #[getter]
     /// The list of tuples that contains the scores and DocAddress of the
     /// search results.
-    fn hits(&self, py: Python) -> PyResult<Vec<(PyObject, DocAddress)>> {
-        let ret: Vec<(PyObject, DocAddress)> = self
+    fn hits(&self, py: Python) -> PyResult<Vec<(Py<PyAny>, DocAddress)>> {
+        let ret: Vec<(Py<PyAny>, DocAddress)> = self
             .hits
             .iter()
-            .map(|(result, address)| (result.to_object(py), address.clone()))
-            .collect();
+            .map(|(result, address)| {
+                Ok((result.into_pyobject(py)?.unbind(), address.clone()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         Ok(ret)
     }
 
     #[getter]
     fn facet_axes(self_: Py<SearchResult>, py: Python) -> PyResult<Py<PyList>> {
-        let result = PyList::empty_bound(py);
+        let result = PyList::empty(py);
         for (field, facet_counts) in &self_.borrow(py).facet_axes {
             let pair: Py<PyTuple> = (
-                field.as_str().to_object(py),
+                field.as_str().into_pyobject(py)?.unbind(),
                 Py::new(
                     py,
                     FacetCounts {
@@ -212,7 +237,8 @@ impl SearchResult {
                     },
                 )?,
             )
-                .into_py(py);
+                .into_pyobject(py)?
+                .unbind();
             result.append(pair)?;
         }
         return Ok(result.into());
@@ -358,7 +384,7 @@ impl Searcher {
         query: &Query,
         agg: Py<PyDict>,
     ) -> PyResult<Py<PyDict>> {
-        let py_json = py.import_bound("json")?;
+        let py_json = py.import("json")?;
         let agg_query_str = py_json.call_method1("dumps", (agg,))?.to_string();
 
         let agg_str = py.allow_threads(move || {
@@ -464,17 +490,21 @@ impl DocAddress {
         self.doc
     }
 
-    fn __richcmp__(
+    fn __richcmp__<'py>(
         &self,
         other: &Self,
         op: CompareOp,
-        py: Python<'_>,
-    ) -> PyObject {
-        match op {
-            CompareOp::Eq => (self == other).into_py(py),
-            CompareOp::Ne => (self != other).into_py(py),
-            _ => py.NotImplemented(),
-        }
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match op {
+            CompareOp::Eq => {
+                (self == other).into_pyobject(py)?.to_owned().into_any()
+            }
+            CompareOp::Ne => {
+                (self != other).into_pyobject(py)?.to_owned().into_any()
+            }
+            _ => PyNotImplemented::get(py).to_owned().into_any(),
+        })
     }
 
     fn __getnewargs__(&self) -> PyResult<(tv::SegmentOrdinal, tv::DocId)> {

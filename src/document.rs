@@ -6,8 +6,8 @@ use pyo3::{
     basic::CompareOp,
     prelude::*,
     types::{
-        PyAny, PyBool, PyDateAccess, PyDateTime, PyDict, PyInt, PyList,
-        PyTimeAccess, PyTuple,
+        PyAny, PyBool, PyDateAccess, PyDateTime, PyDict, PyInt, PyList, PyNone,
+        PyNotImplemented, PyTimeAccess, PyTuple,
     },
     Python,
 };
@@ -52,8 +52,7 @@ pub(crate) fn extract_value(any: &Bound<PyAny>) -> PyResult<Value> {
         return Ok(Value::Bytes(b));
     }
     if let Ok(dict) = any.downcast::<PyDict>() {
-        if let Ok(json) = pythonize::depythonize_bound(dict.clone().into_any())
-        {
+        if let Ok(json) = pythonize::depythonize(&dict.clone().into_any()) {
             return Ok(Value::Object(json));
         }
     }
@@ -129,7 +128,7 @@ pub(crate) fn extract_value_for_type(
                 any.downcast::<PyDict>()
                     .map_err(to_pyerr_for_type("Json", field_name, any))
                     .and_then(|dict| {
-                        pythonize::depythonize_bound(dict.clone().into_any())
+                        pythonize::depythonize(&dict.clone().into_any())
                             .map_err(to_pyerr_for_type("Json", field_name, any))
                     })?,
             )
@@ -200,32 +199,35 @@ fn extract_value_single_or_list_for_type(
     }
 }
 
-fn object_to_py(
-    py: Python,
+fn object_to_py<'py>(
+    py: Python<'py>,
     obj: &BTreeMap<String, Value>,
-) -> PyResult<PyObject> {
-    let dict = PyDict::new_bound(py);
+) -> PyResult<Bound<'py, PyAny>> {
+    let dict = PyDict::new(py);
     for (k, v) in obj.iter() {
         dict.set_item(k, value_to_py(py, v)?)?;
     }
-    Ok(dict.into())
+    Ok(dict.into_any())
 }
 
-fn value_to_py(py: Python, value: &Value) -> PyResult<PyObject> {
+fn value_to_py<'py>(
+    py: Python<'py>,
+    value: &Value,
+) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
-        Value::Null => py.None(),
-        Value::Str(text) => text.into_py(py),
-        Value::U64(num) => (*num).into_py(py),
-        Value::I64(num) => (*num).into_py(py),
-        Value::F64(num) => (*num).into_py(py),
-        Value::Bytes(b) => b.to_object(py),
+        Value::Null => PyNone::get(py).extract()?,
+        Value::Str(ref text) => text.into_pyobject(py)?.into_any(),
+        Value::U64(num) => (*num).into_pyobject(py)?.into_any(),
+        Value::I64(num) => (*num).into_pyobject(py)?.into_any(),
+        Value::F64(num) => (*num).into_pyobject(py)?.into_any(),
+        Value::Bytes(ref b) => b.into_pyobject(py)?.into_any(),
         Value::PreTokStr(_pretoken) => {
             // TODO implement me
             unimplemented!();
         }
         Value::Date(d) => {
             let utc = d.into_utc();
-            PyDateTime::new_bound(
+            PyDateTime::new(
                 py,
                 utc.year(),
                 utc.month() as u8,
@@ -236,11 +238,13 @@ fn value_to_py(py: Python, value: &Value) -> PyResult<PyObject> {
                 utc.microsecond(),
                 None,
             )?
-            .into_py(py)
+            .into_any()
         }
-        Value::Facet(f) => Facet { inner: f.clone() }.into_py(py),
-        Value::Array(arr) => {
-            let list = PyList::empty_bound(py);
+        Value::Facet(f) => {
+            Facet { inner: f.clone() }.into_pyobject(py)?.into_any()
+        }
+        Value::Array(ref arr) => {
+            let list = PyList::empty(py);
             // Because `value_to_py` can return an error, we need to be able
             // to handle those errors on demand. Also, we want to avoid
             // collecting all the values into an intermediate `Vec` before
@@ -250,33 +254,33 @@ fn value_to_py(py: Python, value: &Value) -> PyResult<PyObject> {
             for v in arr {
                 list.append(value_to_py(py, v)?)?;
             }
-            list.into()
+            list.into_any()
         }
-        Value::Object(obj) => object_to_py(py, obj)?,
-        Value::Bool(b) => b.into_py(py),
-        Value::IpAddr(i) => (*i).to_string().into_py(py),
+        Value::Object(ref obj) => object_to_py(py, obj)?,
+        Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
+        Value::IpAddr(i) => (*i).to_string().into_pyobject(py)?.into_any(),
     })
 }
 
 fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => format!("{:?}", value),
-        Value::Str(text) => text.clone(),
+        Value::Str(ref text) => text.clone(),
         Value::U64(num) => format!("{num}"),
         Value::I64(num) => format!("{num}"),
         Value::F64(num) => format!("{num}"),
-        Value::Bytes(bytes) => format!("{bytes:?}"),
+        Value::Bytes(ref bytes) => format!("{bytes:?}"),
         Value::Date(d) => format!("{d:?}"),
         Value::Facet(facet) => facet.to_string(),
         Value::PreTokStr(_pretok) => {
             // TODO implement me
             unimplemented!();
         }
-        Value::Array(arr) => {
+        Value::Array(ref arr) => {
             let inner: Vec<_> = arr.iter().map(value_to_string).collect();
             format!("{inner:?}")
         }
-        Value::Object(json_object) => {
+        Value::Object(ref json_object) => {
             serde_json::to_string(&json_object).unwrap()
         }
         Value::Bool(b) => format!("{b}"),
@@ -564,6 +568,7 @@ impl Document {
         Ok(document)
     }
 
+    #[pyo3(signature = (py_dict, schema = None))]
     fn extend(
         &mut self,
         py_dict: &Bound<PyDict>,
@@ -577,6 +582,7 @@ impl Document {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (py_dict, schema = None))]
     fn from_dict(
         py_dict: &Bound<PyDict>,
         schema: Option<&Schema>,
@@ -599,11 +605,11 @@ impl Document {
     /// For this reason, the dictionary, will associate
     /// a list of value for every field.
     fn to_dict(&self, py: Python) -> PyResult<PyObject> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for (key, values) in &self.field_values {
-            let values_py: Vec<PyObject> = values
+            let values_py: Vec<Py<PyAny>> = values
                 .iter()
-                .map(|v| value_to_py(py, v))
+                .map(|v| value_to_py(py, v).map(|v| v.unbind()))
                 .collect::<PyResult<_>>()?;
             dict.set_item(key, values_py)?;
         }
@@ -715,9 +721,7 @@ impl Document {
                 serde_json::from_str(json_str).map_err(to_pyerr)?;
             self.add_value(field_name, json_map);
             Ok(())
-        } else if let Ok(json_map) =
-            pythonize::depythonize_bound::<JsonMap>(value.clone())
-        {
+        } else if let Ok(json_map) = pythonize::depythonize::<JsonMap>(value) {
             self.add_value(field_name, json_map);
             Ok(())
         } else {
@@ -763,11 +767,11 @@ impl Document {
     ///
     /// Returns the value if one is found, otherwise None.
     /// The type of the value depends on the field.
-    fn get_first(
+    fn get_first<'py>(
         &self,
-        py: Python,
+        py: Python<'py>,
         fieldname: &str,
-    ) -> PyResult<Option<PyObject>> {
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(value) = self.iter_values_for_field(fieldname).next() {
             let py_value = value_to_py(py, value)?;
             Ok(Some(py_value))
@@ -783,9 +787,13 @@ impl Document {
     ///
     /// Returns a list of values.
     /// The type of the value depends on the field.
-    fn get_all(&self, py: Python, field_name: &str) -> PyResult<Vec<PyObject>> {
+    fn get_all(
+        &self,
+        py: Python,
+        field_name: &str,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         self.iter_values_for_field(field_name)
-            .map(|value| value_to_py(py, value))
+            .map(|value| value_to_py(py, value).map(|v| v.into_any().unbind()))
             .collect::<PyResult<Vec<_>>>()
     }
 
@@ -807,37 +815,42 @@ impl Document {
         self.clone()
     }
 
-    fn __richcmp__(
+    fn __richcmp__<'py>(
         &self,
         other: &Self,
         op: CompareOp,
-        py: Python<'_>,
-    ) -> PyObject {
-        match op {
-            CompareOp::Eq => (self == other).into_py(py),
-            CompareOp::Ne => (self != other).into_py(py),
-            _ => py.NotImplemented(),
-        }
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match op {
+            CompareOp::Eq => {
+                (self == other).into_pyobject(py)?.to_owned().into_any()
+            }
+            CompareOp::Ne => {
+                (self != other).into_pyobject(py)?.to_owned().into_any()
+            }
+            _ => PyNotImplemented::get(py).to_owned().into_any(),
+        })
     }
 
     #[staticmethod]
     fn _internal_from_pythonized(serialized: &Bound<PyAny>) -> PyResult<Self> {
-        pythonize::depythonize_bound(serialized.clone()).map_err(to_pyerr)
+        pythonize::depythonize(serialized).map_err(to_pyerr)
     }
 
-    fn __reduce__<'a>(
-        slf: PyRef<'a, Self>,
-        py: Python<'a>,
-    ) -> PyResult<Bound<'a, PyTuple>> {
+    fn __reduce__<'py>(
+        slf: PyRef<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
         let serialized = pythonize::pythonize(py, &*slf).map_err(to_pyerr)?;
 
-        Ok(PyTuple::new_bound(
+        PyTuple::new(
             py,
             [
-                slf.into_py(py).getattr(py, "_internal_from_pythonized")?,
-                PyTuple::new_bound(py, [serialized]).to_object(py),
+                slf.into_pyobject(py)?
+                    .getattr("_internal_from_pythonized")?,
+                PyTuple::new(py, [serialized])?.into_any(),
             ],
-        ))
+        )
     }
 }
 
