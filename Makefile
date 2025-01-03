@@ -40,7 +40,7 @@ build-wheels-local-pyenv:
 			. "$${venv_root}/bin/activate"; \
 			pip install maturin; \
 			for deployment_target in 10.12 10.13 10.14; do \
-				MACOSX_DEPLOYMENT_TARGET="$${deployment_target}" maturin build --release; \
+				MACOSX_DEPLOYMENT_TARGET="$${deployment_target}" maturin build --target universal2-apple-darwin --release; \
 			done \
 		); \
 	done; \
