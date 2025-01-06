@@ -2,7 +2,6 @@ use crate::to_pyerr;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use tantivy as tv;
-use tantivy_tokenizer_api as tokenizer_api;
 
 /// Tantivy Token
 #[pyclass(module = "tantivy.tantivy")]
@@ -65,8 +64,8 @@ impl TokenStream {
     }
 }
 
-impl tokenizer_api::Tokenizer for Box<dyn BoxableTokenizer> {
-    type TokenStream<'a> = tokenizer_api::BoxTokenStream<'a>;
+impl tv::tokenizer::Tokenizer for Box<dyn BoxableTokenizer> {
+    type TokenStream<'a> = tv::tokenizer::BoxTokenStream<'a>;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
         (**self).box_token_stream(text)
@@ -84,16 +83,16 @@ trait BoxableTokenizer: 'static + Send + Sync {
     fn box_token_stream<'a>(
         &'a mut self,
         text: &'a str,
-    ) -> tokenizer_api::BoxTokenStream<'a>;
+    ) -> tv::tokenizer::BoxTokenStream<'a>;
     fn box_clone(&self) -> Box<dyn BoxableTokenizer>;
 }
 
-impl<T: tokenizer_api::Tokenizer> BoxableTokenizer for T {
+impl<T: tv::tokenizer::Tokenizer> BoxableTokenizer for T {
     fn box_token_stream<'a>(
         &'a mut self,
         text: &'a str,
-    ) -> tokenizer_api::BoxTokenStream<'a> {
-        tokenizer_api::BoxTokenStream::new(self.token_stream(text))
+    ) -> tv::tokenizer::BoxTokenStream<'a> {
+        tv::tokenizer::BoxTokenStream::new(self.token_stream(text))
     }
 
     fn box_clone(&self) -> Box<dyn BoxableTokenizer> {

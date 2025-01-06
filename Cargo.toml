@@ -1,6 +1,6 @@
 [package]
 name = "tantivy_oc_fork"
-version = "0.22.0-dev"
+version = "0.21.1-dev"
 readme = "README.md"
 authors = ["Damir Jelić <poljar@termina.org.uk>"]
 edition = "2021"
@@ -14,9 +14,9 @@ crate-type = ["cdylib"]
 pyo3-build-config = "0.23.3"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.21"
 chrono = "0.4.39"
-tantivy = "0.22.0"
+tantivy = "0.21.1"
 itertools = "0.13.0"
 futures = "0.3.31"
 pythonize = "^0.23.0"

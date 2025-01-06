@@ -82,59 +82,6 @@ class TestClass(object):
         doc_freq = searcher.doc_freq("body", "and")
         assert doc_freq == 3
 
-    def test_and_aggregate(self, ram_index_numeric_fields):
-        index = ram_index_numeric_fields
-        query = Query.all_query()
-        agg_query = {
-            "top_hits_req": {
-                "top_hits": {
-                    "size": 2,
-                    "sort": [{"rating": "desc"}],
-                    "from": 0,
-                    "docvalue_fields": ["rating", "id", "body"],
-                }
-            }
-        }
-        searcher = index.searcher()
-        result = searcher.aggregate(query, agg_query)
-        assert isinstance(result, dict)
-        assert "top_hits_req" in result
-        assert len(result["top_hits_req"]["hits"]) == 2
-        for hit in result["top_hits_req"]["hits"]:
-            assert len(hit["docvalue_fields"]) == 3
-
-        assert result == json.loads("""
-{
-"top_hits_req": {
-    "hits": [
-      {
-        "sort": [ 13840124604862955520 ],
-        "docvalue_fields": {
-          "id": [ 2 ],
-          "rating": [ 4.5 ],
-          "body": [ "a", "few", "miles", "south", "of", "soledad", "the", "salinas", "river", "drops", "in", "close", "to", "the", "hillside",
-            "bank", "and", "runs", "deep", "and", "green", "the", "water", "is", "warm", "too", "for", "it", "has", "slipped", "twinkling",
-            "over", "the", "yellow", "sands", "in", "the", "sunlight", "before", "reaching", "the", "narrow", "pool",
-            "on", "one", "side", "of", "the", "river", "the", "golden", "foothill", "slopes", "curve", "up",
-            "to", "the", "strong", "and", "rocky", "gabilan", "mountains", "but", "on", "the", "valley", "side", "the",
-            "water", "is", "lined", "with", "trees", "willows", "fresh", "and", "green", "with", "every", "spring", "carrying", "in", "their", "lower", "leaf",
-            "junctures", "the", "debris", "of", "the", "winter", "s", "flooding", "and", "sycamores", "with", "mottled", "white", "recumbent", "limbs",
-            "and", "branches", "that", "arch", "over", "the", "pool" ]
-        }
-      },
-      {
-        "sort": [ 13838435755002691584 ],
-        "docvalue_fields": {
-          "body": [ "he", "was", "an", "old", "man", "who", "fished", "alone", "in", "a", "skiff", "inthe", "gulf", "stream",
-            "and", "he", "had", "gone", "eighty", "four", "days", "now", "without", "taking", "a", "fish" ],
-          "rating": [ 3.5 ],
-          "id": [ 1 ]
-        }
-      }
-    ]
-  }
-}
-""")
 
     def test_and_query_numeric_fields(self, ram_index_numeric_fields):
         index = ram_index_numeric_fields
@@ -307,7 +254,7 @@ class TestClass(object):
     def test_order_by_search_date(self):
         schema = (
             SchemaBuilder()
-            .add_date_field("order", fast=True)
+            .add_unsigned_field("order", fast=True)
             .add_text_field("title", stored=True)
             .build()
         )
@@ -316,18 +263,18 @@ class TestClass(object):
         writer = index.writer()
 
         doc = Document()
-        doc.add_date("order", datetime.datetime(2020, 1, 1))
+        doc.add_unsigned("order", 1)
         doc.add_text("title", "Test title")
 
         writer.add_document(doc)
 
         doc = Document()
-        doc.add_date("order", datetime.datetime(2022, 1, 1))
+        doc.add_unsigned("order", 3)
         doc.add_text("title", "Final test title")
         writer.add_document(doc)
 
         doc = Document()
-        doc.add_date("order", datetime.datetime(2021, 1, 1))
+        doc.add_unsigned("order", 2)
         doc.add_text("title", "Another test title")
 
         writer.add_document(doc)
@@ -617,7 +564,7 @@ class TestDocument(object):
         assert doc.to_dict() == {"name": ["Bill"], "reference": [1, 2]}
 
     def test_document_with_date(self):
-        date = datetime.datetime(2019, 8, 12, 13, 0, 0)
+        date = datetime.datetime(2019, 8, 12, 13, 0, 0, tzinfo=None)
         doc = tantivy.Document(name="Bill", date=date)
         assert doc["date"][0] == date
 
@@ -1203,7 +1150,7 @@ class TestQuery(object):
         mlt_query = Query.more_like_this_query(doc_address)
         assert (
             repr(mlt_query)
-            == "Query(MoreLikeThisQuery { mlt: MoreLikeThis { min_doc_frequency: Some(5), max_doc_frequency: None, min_term_frequency: Some(2), max_query_terms: Some(25), min_word_length: None, max_word_length: None, boost_factor: Some(1.0), stop_words: [] }, target: DocumentAddress(DocAddress { segment_ord: 0, doc_id: 0 }) })"
+            == "Query(MoreLikeThisQuery { mlt: MoreLikeThis { min_doc_frequency: Some(5), max_doc_frequency: None, min_term_frequency: Some(2), max_query_terms: Some(25), min_word_length: None, max_word_length: None, boost_factor: Some(1.0), stop_words: [] }, target: DocumentAdress(DocAddress { segment_ord: 0, doc_id: 0 }) })"
         )
         result = index.searcher().search(mlt_query, 10)
         assert len(result.hits) == 0
@@ -1221,7 +1168,7 @@ class TestQuery(object):
             stop_words=["fish"])
         assert (
             repr(mlt_query)
-            == "Query(MoreLikeThisQuery { mlt: MoreLikeThis { min_doc_frequency: Some(2), max_doc_frequency: Some(10), min_term_frequency: Some(1), max_query_terms: Some(10), min_word_length: Some(2), max_word_length: Some(20), boost_factor: Some(2.0), stop_words: [\"fish\"] }, target: DocumentAddress(DocAddress { segment_ord: 0, doc_id: 0 }) })"
+            == "Query(MoreLikeThisQuery { mlt: MoreLikeThis { min_doc_frequency: Some(2), max_doc_frequency: Some(10), min_term_frequency: Some(1), max_query_terms: Some(10), min_word_length: Some(2), max_word_length: Some(20), boost_factor: Some(2.0), stop_words: [\"fish\"] }, target: DocumentAdress(DocAddress { segment_ord: 0, doc_id: 0 }) })"
         )
         result = index.searcher().search(mlt_query, 10)
         assert len(result.hits) > 0

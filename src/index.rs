@@ -19,7 +19,7 @@ use tantivy as tv;
 use tantivy::{
     directory::MmapDirectory,
     schema::{
-        document::TantivyDocument, NamedFieldDocument, OwnedValue as Value,
+        NamedFieldDocument, Value,
         Term,
     },
     tokenizer::{
@@ -78,7 +78,7 @@ impl IndexWriter {
     /// since the creation of the index.
     pub fn add_document(&mut self, doc: &Document) -> PyResult<u64> {
         let named_doc = NamedFieldDocument(doc.field_values.clone());
-        let doc = TantivyDocument::convert_named_doc(&self.schema, named_doc)
+        let doc = self.schema.convert_named_doc(named_doc)
             .map_err(to_pyerr)?;
         self.inner()?.add_document(doc).map_err(to_pyerr)
     }
@@ -92,7 +92,7 @@ impl IndexWriter {
     /// The `opstamp` represents the number of documents that have been added
     /// since the creation of the index.
     pub fn add_json(&mut self, json: &str) -> PyResult<u64> {
-        let doc = TantivyDocument::parse_json(&self.schema, json)
+        let doc = self.schema.parse_document(json)
             .map_err(to_pyerr)?;
         let opstamp = self.inner()?.add_document(doc);
         opstamp.map_err(to_pyerr)
@@ -161,11 +161,6 @@ impl IndexWriter {
         let field = get_field(&self.schema, field_name)?;
         let value = extract_value(field_value)?;
         let term = match value {
-            Value::Null => {
-                return Err(exceptions::PyValueError::new_err(format!(
-                    "Field `{field_name}` is null type not deletable."
-                )))
-            },
             Value::Str(text) => Term::from_field_text(field, &text),
             Value::U64(num) => Term::from_field_u64(field, num),
             Value::I64(num) => Term::from_field_i64(field, num),
@@ -182,12 +177,7 @@ impl IndexWriter {
                     "Field `{field_name}` is pretokenized. This is not authorized for delete."
                 )))
             }
-            Value::Array(_) => {
-                return Err(exceptions::PyValueError::new_err(format!(
-                    "Field `{field_name}` is array type not deletable."
-                )))
-            }
-            Value::Object(_) => {
+            Value::JsonObject(_) => {
                 return Err(exceptions::PyValueError::new_err(format!(
                     "Field `{field_name}` is json object type not deletable."
                 )))
@@ -314,9 +304,9 @@ impl Index {
     ) -> Result<(), PyErr> {
         let reload_policy = reload_policy.to_lowercase();
         let reload_policy = match reload_policy.as_ref() {
-            "commit" => tv::ReloadPolicy::OnCommitWithDelay,
-            "on-commit" => tv::ReloadPolicy::OnCommitWithDelay,
-            "oncommit" => tv::ReloadPolicy::OnCommitWithDelay,
+            "commit" => tv::ReloadPolicy::OnCommit,
+            "on-commit" => tv::ReloadPolicy::OnCommit,
+            "oncommit" => tv::ReloadPolicy::OnCommit,
             "manual" => tv::ReloadPolicy::Manual,
             _ => return Err(exceptions::PyValueError::new_err(
                 "Invalid reload policy, valid choices are: 'manual' and 'OnCommit'"

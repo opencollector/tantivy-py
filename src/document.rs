@@ -1,25 +1,27 @@
 #![allow(clippy::new_ret_no_self)]
 #![allow(clippy::wrong_self_convention)]
 
-use itertools::Itertools;
 use pyo3::{
     basic::CompareOp,
     prelude::*,
+    exceptions::PyValueError,
     types::{
-        PyAny, PyBool, PyDateAccess, PyDateTime, PyDict, PyInt, PyList, PyNone,
+        PyAny, PyBool, PyDateAccess, PyDateTime, PyDict, PyInt, PyList,
         PyNotImplemented, PyTimeAccess, PyTuple,
     },
     Python,
 };
 
 use chrono::{offset::TimeZone, NaiveDateTime, Utc};
+use itertools::Itertools;
 
-use tantivy::{self as tv, schema::document::OwnedValue as Value};
+use tantivy::{self as tv, schema::Value};
 
 use crate::{facet::Facet, schema::Schema, to_pyerr};
 use serde::{
     ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer,
 };
+use serde_json::Value as JsonValue;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -53,7 +55,7 @@ pub(crate) fn extract_value(any: &Bound<PyAny>) -> PyResult<Value> {
     }
     if let Ok(dict) = any.downcast::<PyDict>() {
         if let Ok(json) = pythonize::depythonize(&dict.clone().into_any()) {
-            return Ok(Value::Object(json));
+            return Ok(Value::JsonObject(json));
         }
     }
     Err(to_pyerr(format!("Value unsupported {any:?}")))
@@ -120,11 +122,11 @@ pub(crate) fn extract_value_for_type(
         tv::schema::Type::Json => {
             if let Ok(json_str) = any.extract::<&str>() {
                 return serde_json::from_str(json_str)
-                    .map(Value::Object)
+                    .map(Value::JsonObject)
                     .map_err(to_pyerr_for_type("Json", field_name, any));
             }
 
-            Value::Object(
+            Value::JsonObject(
                 any.downcast::<PyDict>()
                     .map_err(to_pyerr_for_type("Json", field_name, any))
                     .and_then(|dict| {
@@ -201,11 +203,11 @@ fn extract_value_single_or_list_for_type(
 
 fn object_to_py<'py>(
     py: Python<'py>,
-    obj: &BTreeMap<String, Value>,
+    obj: &serde_json::Map<String, serde_json::Value>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let dict = PyDict::new(py);
     for (k, v) in obj.iter() {
-        dict.set_item(k, value_to_py(py, v)?)?;
+        dict.set_item(k, json_value_to_py(py, v)?)?;
     }
     Ok(dict.into_any())
 }
@@ -215,7 +217,6 @@ fn value_to_py<'py>(
     value: &Value,
 ) -> PyResult<Bound<'py, PyAny>> {
     Ok(match value {
-        Value::Null => PyNone::get(py).extract()?,
         Value::Str(ref text) => text.into_pyobject(py)?.into_any(),
         Value::U64(num) => (*num).into_pyobject(py)?.into_any(),
         Value::I64(num) => (*num).into_pyobject(py)?.into_any(),
@@ -243,28 +244,39 @@ fn value_to_py<'py>(
         Value::Facet(f) => {
             Facet { inner: f.clone() }.into_pyobject(py)?.into_any()
         }
-        Value::Array(ref arr) => {
-            let list = PyList::empty(py);
-            // Because `value_to_py` can return an error, we need to be able
-            // to handle those errors on demand. Also, we want to avoid
-            // collecting all the values into an intermediate `Vec` before
-            // creating the `PyList`. So, the loop below is the simplest
-            // solution. Another option might have been
-            // `arr.iter().try_for_each(...)` but it just looks more complex.
-            for v in arr {
-                list.append(value_to_py(py, v)?)?;
-            }
-            list.into_any()
-        }
-        Value::Object(ref obj) => object_to_py(py, obj)?,
+        Value::JsonObject(ref obj) => object_to_py(py, obj)?,
         Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
         Value::IpAddr(i) => (*i).to_string().into_pyobject(py)?.into_any(),
     })
 }
 
+fn json_value_to_py<'py>(
+    py: Python<'py>,
+    value: &JsonValue,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match value {
+        JsonValue::Null => py.None().bind(py).to_owned(),
+        JsonValue::Bool(b) => b.into_pyobject(py)?.to_owned().into_any(),
+        JsonValue::Number(num) => match num {
+            n if n.is_i64() => n.as_i64().into_pyobject(py)?.into_any(),
+            n if n.is_u64() => n.as_u64().into_pyobject(py)?.into_any(),
+            n if n.is_f64() => n.as_f64().into_pyobject(py)?.into_any(),
+            _ => Err(PyValueError::new_err("number too large"))?,
+        },
+        JsonValue::String(ref text) => text.into_pyobject(py)?.into_any(),
+        JsonValue::Array(ref v) => {
+            let r = PyList::empty(py);
+            for x in v.iter() {
+                r.append(json_value_to_py(py, x)?)?;
+            }
+            r.into_any()
+        },
+        JsonValue::Object(ref obj) => object_to_py(py, obj)?,
+    })
+}
+
 fn value_to_string(value: &Value) -> String {
     match value {
-        Value::Null => format!("{:?}", value),
         Value::Str(ref text) => text.clone(),
         Value::U64(num) => format!("{num}"),
         Value::I64(num) => format!("{num}"),
@@ -276,11 +288,7 @@ fn value_to_string(value: &Value) -> String {
             // TODO implement me
             unimplemented!();
         }
-        Value::Array(ref arr) => {
-            let inner: Vec<_> = arr.iter().map(value_to_string).collect();
-            format!("{inner:?}")
-        }
-        Value::Object(ref json_object) => {
+        Value::JsonObject(ref json_object) => {
             serde_json::to_string(&json_object).unwrap()
         }
         Value::Bool(b) => format!("{b}"),
@@ -320,8 +328,6 @@ where
 /// necessary for serialization.
 #[derive(Deserialize, Serialize)]
 enum SerdeValue {
-    /// Null
-    Null,
     /// The str type is used for any text information.
     Str(String),
     /// Pre-tokenized str type,
@@ -344,10 +350,8 @@ enum SerdeValue {
     Facet(tv::schema::Facet),
     /// Arbitrarily sized byte array
     Bytes(Vec<u8>),
-    /// Array
-    Array(Vec<Value>),
     /// Object value.
-    Object(BTreeMap<String, Value>),
+    JsonObject(serde_json::Map<String, JsonValue>),
     /// IpV6 Address. Internally there is no IpV4, it needs to be converted to `Ipv6Addr`.
     IpAddr(Ipv6Addr),
 }
@@ -355,7 +359,6 @@ enum SerdeValue {
 impl From<SerdeValue> for Value {
     fn from(value: SerdeValue) -> Self {
         match value {
-            SerdeValue::Null => Self::Null,
             SerdeValue::Str(v) => Self::Str(v),
             SerdeValue::PreTokStr(v) => Self::PreTokStr(v),
             SerdeValue::U64(v) => Self::U64(v),
@@ -364,8 +367,7 @@ impl From<SerdeValue> for Value {
             SerdeValue::Date(v) => Self::Date(v),
             SerdeValue::Facet(v) => Self::Facet(v),
             SerdeValue::Bytes(v) => Self::Bytes(v),
-            SerdeValue::Array(v) => Self::Array(v),
-            SerdeValue::Object(v) => Self::Object(v),
+            SerdeValue::JsonObject(v) => Self::JsonObject(v),
             SerdeValue::Bool(v) => Self::Bool(v),
             SerdeValue::IpAddr(v) => Self::IpAddr(v),
         }
@@ -375,7 +377,6 @@ impl From<SerdeValue> for Value {
 impl From<Value> for SerdeValue {
     fn from(value: Value) -> Self {
         match value {
-            Value::Null => Self::Null,
             Value::Str(v) => Self::Str(v),
             Value::PreTokStr(v) => Self::PreTokStr(v),
             Value::U64(v) => Self::U64(v),
@@ -384,8 +385,7 @@ impl From<Value> for SerdeValue {
             Value::Date(v) => Self::Date(v),
             Value::Facet(v) => Self::Facet(v),
             Value::Bytes(v) => Self::Bytes(v),
-            Value::Array(v) => Self::Array(v),
-            Value::Object(v) => Self::Object(v),
+            Value::JsonObject(v) => Self::JsonObject(v),
             Value::Bool(v) => Self::Bool(v),
             Value::IpAddr(v) => Self::IpAddr(v),
         }
@@ -396,8 +396,6 @@ impl From<Value> for SerdeValue {
 /// cloning.
 #[derive(Serialize)]
 enum BorrowedSerdeValue<'a> {
-    /// Null
-    Null,
     /// The str type is used for any text information.
     Str(&'a str),
     /// Pre-tokenized str type,
@@ -417,10 +415,8 @@ enum BorrowedSerdeValue<'a> {
     Facet(&'a tv::schema::Facet),
     /// Arbitrarily sized byte array
     Bytes(&'a [u8]),
-    /// Array
-    Array(&'a Vec<Value>),
     /// Json object value.
-    Object(&'a BTreeMap<String, Value>),
+    JsonObject(&'a serde_json::Map<String, JsonValue>),
     /// IpV6 Address. Internally there is no IpV4, it needs to be converted to `Ipv6Addr`.
     IpAddr(&'a Ipv6Addr),
 }
@@ -428,7 +424,6 @@ enum BorrowedSerdeValue<'a> {
 impl<'a> From<&'a Value> for BorrowedSerdeValue<'a> {
     fn from(value: &'a Value) -> Self {
         match value {
-            Value::Null => Self::Null,
             Value::Str(v) => Self::Str(v),
             Value::PreTokStr(v) => Self::PreTokStr(v),
             Value::U64(v) => Self::U64(v),
@@ -437,8 +432,7 @@ impl<'a> From<&'a Value> for BorrowedSerdeValue<'a> {
             Value::Date(v) => Self::Date(v),
             Value::Facet(v) => Self::Facet(v),
             Value::Bytes(v) => Self::Bytes(v),
-            Value::Array(v) => Self::Array(v),
-            Value::Object(v) => Self::Object(v),
+            Value::JsonObject(v) => Self::JsonObject(v),
             Value::Bool(v) => Self::Bool(v),
             Value::IpAddr(v) => Self::IpAddr(v),
         }
