@@ -61,10 +61,13 @@ impl Facet {
     ///
     /// Returns the created Facet.
     #[classmethod]
-    fn from_string(_cls: &Bound<PyType>, facet_string: &str) -> Facet {
-        Facet {
-            inner: schema::Facet::from(facet_string),
-        }
+    fn from_string(
+        _cls: &Bound<PyType>,
+        facet_string: &str,
+    ) -> PyResult<Facet> {
+        Ok(Facet {
+            inner: schema::Facet::from_text(facet_string).map_err(to_pyerr)?,
+        })
     }
 
     /// Returns the list of `segments` that forms a facet path.
