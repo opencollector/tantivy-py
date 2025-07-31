@@ -18,7 +18,7 @@ tantivy/tantivy.so: target/debug/libtantivy.so
 target/debug/libtantivy.so: $(source_files)
 	cargo build
 
-PYTHON_VERSIONS =  cp38-cp38 cp39-cp39 cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp313-cp313t
+PYTHON_VERSIONS = cp39-cp39 cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp313-cp313t
 
 build-wheels:
 	for PLATFORM in x86_64 aarch64; do \

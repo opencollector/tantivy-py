@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "tantivy_oc_fork"
-version = "0.22.0-dev"
+version = "0.22.0-dev1"
 dependencies = [
  "base64",
  "chrono",
